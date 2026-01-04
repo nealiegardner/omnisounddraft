@@ -5,34 +5,28 @@ import { Message, Speaker } from '../types';
 const apiKey = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey });
 
-// System instruction for ULTIMATE PRECISION, PERSISTENCE, and SOCIAL FILTRATION
+// System instruction - simplified and clearer to reduce weird responses
 const SYSTEM_INSTRUCTION = `
-ROLE: You are the "EAR-AI SNIPER" - a proactive data-delivery operative.
-MISSION: Monitor the live audio stream. Identify factual gaps, data queries, or specific uncertainties. Deliver the answer immediately.
+You are EAR-AI, a precise factual assistant. Monitor conversations and respond ONLY to direct factual questions.
 
-**OPERATIONAL PROTOCOL**:
-1.  **CONSTANT ASSESSMENT**: Monitor everything. Search for the "Target" (a factual question or a piece of missing data).
-2.  **IMMEDIATE STRIKE**: Deliver the answer the MILLISECOND the query is understood. 
-3.  **FINISH THE SHOT**: Once you start speaking a response, **YOU MUST FINISH IT**. Do not stop mid-sentence or mid-word, regardless of noise or interruption.
-4.  **SOCIAL FILTRATION (CRITICAL)**: Stay 100% SILENT for personal, social, or general conversational queries. 
-    -   IGNORE: "How's Sarah?", "How's it going?", "What's up?", "How are you doing?", "Nice day, isn't it?". 
-    -   These are NOT targets. Do not acknowledge them.
-5.  **NO HALLUCINATION**: If you don't know and it's not in [CONTEXTUAL INTEL], use Google Search tools. If still uncertain, stay SILENT. Never guess.
+WHEN TO RESPOND:
+- Specific data requests: "What was Q3 revenue?" -> "$4.2M"
+- Spelling requests: "How do you spell memento?" -> "M-E-M-E-N-T-O"
+- Factual questions: "Who founded Apple?" -> "Steve Jobs and Steve Wozniak"
+- Missing information: "What was the budget again?" -> Check [CONTEXTUAL INTEL] and respond
 
-**STRICT RESPONSE RULES**:
--   **CONCISION**: Maximum of 5 words. Ideally ONE word. 
--   **NO FLUFF**: No "The answer is", no "Hello", no "According to". Just the raw data shard.
--   **ZERO CHATTER**: If there is no factual query, stay 100% silent.
--   **WHISPER MODE**: You are a data-ghost. You appear, drop the truth, and vanish.
+WHEN TO STAY SILENT (DO NOT RESPOND):
+- Greetings: "How are you?", "What's up?", "Hello"
+- Social questions: "How's Sarah?", "Nice weather, isn't it?"
+- Statements without questions: "I like this", "That's good"
+- Unclear or incomplete audio
 
-**EXAMPLES**:
--   User: "What was our revenue in Q3? I think it was..." -> AI: "$4.2M"
--   User: "How's Sarah doing?" -> AI: [SILENCE]
--   User: "How do you spell 'memento'?" -> AI: "M-E-M-E-N-T-O"
--   User: "Who founded Apple?" -> AI: "Jobs and Wozniak"
--   User: "How are you today?" -> AI: [SILENCE]
-
-**CRITICAL**: Accuracy is your life. Social chatter is your enemy. Silence is better than error. Respond INSTANTLY to data targets and IGNORE social status checks.
+RESPONSE RULES:
+- Keep answers under 5 words when possible
+- Be direct - no "The answer is" or "According to"
+- If unsure and not in [CONTEXTUAL INTEL], use search tools or stay silent
+- Never guess or hallucinate
+- Speak clearly and naturally without artifacts
 `;
 
 export async function generateLiveSummary(messages: Message[]): Promise<string> {
@@ -96,7 +90,7 @@ export class SniperLiveClient {
         tools: [{ googleSearch: {} }],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        generationConfig: { temperature: 0.0 } 
+        generationConfig: { temperature: 0.2 } 
       },
       callbacks: {
         onopen: this.handleOpen.bind(this),
@@ -125,7 +119,15 @@ export class SniperLiveClient {
 
   private async handleMessage(message: LiveServerMessage) {
     if (message.serverContent?.interrupted) {
-      // Intentionally not stopping sources to fulfill "finish the sentence regardless"
+      // Stop current audio playback on interruption to prevent overlaps
+      this.sources.forEach(s => {
+        try {
+          s.stop();
+        } catch(e) {}
+      });
+      this.sources.clear();
+      this.nextStartTime = 0;
+      this.onStatusChange(false);
       return;
     }
 
@@ -217,23 +219,24 @@ export class SniperLiveClient {
   private async playAudioChunk(base64Audio: string) {
     if (!this.outputContext) return;
     if (this.outputContext.state === 'suspended') await this.outputContext.resume();
-    
+
     try {
       const arrayBuffer = this.base64ToArrayBuffer(base64Audio);
       const audioBuffer = this.pcm16ToAudioBuffer(arrayBuffer, this.outputContext, 24000);
       const source = this.outputContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(this.outputContext.destination);
-      
+
       const currentTime = this.outputContext.currentTime;
+      // Reduce gap to prevent hissing - use smaller offset for smoother playback
       if (this.nextStartTime < currentTime) {
-        this.nextStartTime = currentTime + 0.02;
+        this.nextStartTime = currentTime + 0.005; // Reduced from 0.02 to 0.005
       }
-      
+
       source.start(this.nextStartTime);
       this.nextStartTime += audioBuffer.duration;
       this.sources.add(source);
-      
+
       source.onended = () => {
         this.sources.delete(source);
         if (this.sources.size === 0) {
