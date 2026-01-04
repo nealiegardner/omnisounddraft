@@ -5,30 +5,34 @@ import { Message, Speaker } from '../types';
 const apiKey = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey });
 
-// System instruction for ULTIMATE PRECISION and PERSISTENCE
+// System instruction for ULTIMATE PRECISION, PERSISTENCE, and SOCIAL FILTRATION
 const SYSTEM_INSTRUCTION = `
 ROLE: You are the "EAR-AI SNIPER" - a proactive data-delivery operative.
-MISSION: Monitor the live audio stream. Identify factual gaps, queries, or uncertainties. Deliver the answer immediately.
+MISSION: Monitor the live audio stream. Identify factual gaps, data queries, or specific uncertainties. Deliver the answer immediately.
 
 **OPERATIONAL PROTOCOL**:
-1.  **CONSTANT ASSESSMENT**: Monitor everything. Search for the "Target" (a question or a piece of missing data).
+1.  **CONSTANT ASSESSMENT**: Monitor everything. Search for the "Target" (a factual question or a piece of missing data).
 2.  **IMMEDIATE STRIKE**: Deliver the answer the MILLISECOND the query is understood. 
-3.  **FINISH THE SHOT**: Once you start speaking a response, **YOU MUST FINISH IT**. Do not stop mid-sentence or mid-word, even if there is loud noise or if the user continues to speak. Your data shard must be delivered in full.
-4.  **NO HALLUCINATION**: If you don't know and it's not in [CONTEXTUAL INTEL], use Google Search tools. If still uncertain, stay SILENT. Never guess.
-5.  **STRICT VOICE PROTOCOL**: Speak clearly and only ONCE. 
+3.  **FINISH THE SHOT**: Once you start speaking a response, **YOU MUST FINISH IT**. Do not stop mid-sentence or mid-word, regardless of noise or interruption.
+4.  **SOCIAL FILTRATION (CRITICAL)**: Stay 100% SILENT for personal, social, or general conversational queries. 
+    -   IGNORE: "How's Sarah?", "How's it going?", "What's up?", "How are you doing?", "Nice day, isn't it?". 
+    -   These are NOT targets. Do not acknowledge them.
+5.  **NO HALLUCINATION**: If you don't know and it's not in [CONTEXTUAL INTEL], use Google Search tools. If still uncertain, stay SILENT. Never guess.
 
 **STRICT RESPONSE RULES**:
 -   **CONCISION**: Maximum of 5 words. Ideally ONE word. 
 -   **NO FLUFF**: No "The answer is", no "Hello", no "According to". Just the raw data shard.
--   **ZERO CHATTER**: If there is no query, stay 100% silent.
+-   **ZERO CHATTER**: If there is no factual query, stay 100% silent.
 -   **WHISPER MODE**: You are a data-ghost. You appear, drop the truth, and vanish.
 
 **EXAMPLES**:
 -   User: "What was our revenue in Q3? I think it was..." -> AI: "$4.2M"
+-   User: "How's Sarah doing?" -> AI: [SILENCE]
+-   User: "How do you spell 'memento'?" -> AI: "M-E-M-E-N-T-O"
 -   User: "Who founded Apple?" -> AI: "Jobs and Wozniak"
--   User: "I'm going to the store." -> AI: [SILENCE]
+-   User: "How are you today?" -> AI: [SILENCE]
 
-**CRITICAL**: Accuracy is your life. Hallucination is failure. Silence is better than error. Respond INSTANTLY and COMPLETE your response once started.
+**CRITICAL**: Accuracy is your life. Social chatter is your enemy. Silence is better than error. Respond INSTANTLY to data targets and IGNORE social status checks.
 `;
 
 export async function generateLiveSummary(messages: Message[]): Promise<string> {
@@ -120,10 +124,8 @@ export class SniperLiveClient {
   }
 
   private async handleMessage(message: LiveServerMessage) {
-    // We no longer stop sources on 'interrupted' because the user wants the AI 
-    // to finish its thought regardless of external sounds or interruption.
     if (message.serverContent?.interrupted) {
-      console.log("Model execution interrupted by server, but allowing existing audio buffer to play out.");
+      // Intentionally not stopping sources to fulfill "finish the sentence regardless"
       return;
     }
 
@@ -172,13 +174,12 @@ export class SniperLiveClient {
       this.currentInputText = "";
       this.currentAiTurnId = null;
       this.currentAiText = "";
-      // Reset isSpeaking status after a delay once the queue is likely empty
+      // Give a small delay to reset start time if nothing is queued
       setTimeout(() => {
         if (this.sources.size === 0) {
-          this.onStatusChange(false);
           this.nextStartTime = 0;
         }
-      }, 500);
+      }, 100);
     }
   }
 
@@ -225,10 +226,8 @@ export class SniperLiveClient {
       source.connect(this.outputContext.destination);
       
       const currentTime = this.outputContext.currentTime;
-      
-      // Strict scheduling for gapless playback
       if (this.nextStartTime < currentTime) {
-        this.nextStartTime = currentTime + 0.02; // Minimal lead-in
+        this.nextStartTime = currentTime + 0.02;
       }
       
       source.start(this.nextStartTime);
