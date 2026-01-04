@@ -1,0 +1,7 @@
+{
+  "name": "EarAI_V.1.0",
+  "description": "A low-latency, zero-touch conversational assistant that monitors streams for factual queries and whispers raw data shards.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
