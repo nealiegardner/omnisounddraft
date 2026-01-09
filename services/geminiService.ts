@@ -2,57 +2,74 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { Message, Speaker } from '../types';
 
-const apiKey = process.env.API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
-
-// System instruction - simplified and clearer to reduce weird responses
-const SYSTEM_INSTRUCTION = `
-You are EAR-AI, a precise factual assistant. Monitor conversations and respond ONLY to direct factual questions.
-
-WHEN TO RESPOND:
-- Specific data requests: "What was Q3 revenue?" -> "$4.2M"
-- Spelling requests: "How do you spell memento?" -> "M-E-M-E-N-T-O"
-- Factual questions: "Who founded Apple?" -> "Steve Jobs and Steve Wozniak"
-- Missing information: "What was the budget again?" -> Check [CONTEXTUAL INTEL] and respond
-
-WHEN TO STAY SILENT (DO NOT RESPOND):
-- Greetings: "How are you?", "What's up?", "Hello"
-- Social questions: "How's Sarah?", "Nice weather, isn't it?"
-- Statements without questions: "I like this", "That's good"
-- Unclear or incomplete audio
-
-RESPONSE RULES:
-- Keep answers under 5 words when possible
-- Be direct - no "The answer is" or "According to"
-- If unsure and not in [CONTEXTUAL INTEL], use search tools or stay silent
-- Never guess or hallucinate
-- Speak clearly and naturally without artifacts
-`;
-
-export async function generateLiveSummary(messages: Message[]): Promise<string> {
-  if (messages.length === 0) return "";
-  const transcript = messages
-    .map(m => `${m.speaker === Speaker.AI ? 'AI' : 'SOURCE'}: ${m.text}`)
-    .join('\n');
-
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: `Summarize key intel points. Max 5. Sharp fragments only.\n\nTRANSCRIPT:\n${transcript}` }]
-        }
-      ]
-    });
-    return response.text || "";
-  } catch (error) {
-    return "";
+function decode(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
   }
+  return bytes;
 }
 
+function encode(bytes: Uint8Array): string {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
+const SYSTEM_INSTRUCTION = `
+# ROLE: EAR-AI SNIPER (PROACTIVE INTELLIGENCE)
+Operate as a silent background monitor. Use the following logic to determine when to speak.
+
+## CORE LOGIC: QUESTION DETECTION ENGINE (QDE)
+- MONITOR ALL AUDIO. TRANSCRIBE CONTINUOUSLY.
+- DEFAULT STATE: ABSOLUTE SILENCE. 
+- TRIGGER CONDITION: Only strike when a DIRECT, FACTUAL QUESTION is detected.
+- QUESTION SCORE: 
+    - Lexical Triggers: "What", "When", "How", "Is it true", "Do you know".
+    - Syntactic Cues: Auxiliary inversion ("Are we...", "Do you...").
+    - Memory Prompts: "I can't remember...", "I'm blanking on...".
+- STRIKE DECISION: If Score >= Threshold AND the question is "complete enough" -> Answer immediately.
+
+## STRIKE RULES
+- BREVITY IS SURVIVAL: Responses must be "Data Shards" (One word, one number, or a single semicolon-separated list).
+- NO FILLER: Prohibited words: "The", "Is", "Searching", "Hello", "Sure", "Let me check".
+- EXCLUDE META-QUESTIONS: Do not respond to "What if someone asked...", "He asked what...", or "Imagine asking...".
+
+## LATENCY PROTOCOL
+- RESPOND IMMEDIATELY. NO THINKING. 
+- PROVIDE RAW INTEL FRAGMENTS.
+- ONCE STRUCK, RETURN TO SILENCE IMMEDIATELY.
+
+## INTEL TARGETS (TRIGGER LEXICON)
+- Factual queries, calculations, definitions, status checks, or memory recall.
+`;
+
 export class SniperLiveClient {
-  private session: any = null;
+  private activeSession: any = null;
   private inputContext: AudioContext | null = null;
   private outputContext: AudioContext | null = null;
   private inputSource: MediaStreamAudioSourceNode | null = null;
@@ -72,211 +89,172 @@ export class SniperLiveClient {
   constructor() {}
 
   async connect(knowledge: string) {
-    if (!process.env.API_KEY) throw new Error("No API Key");
+    if (!process.env.API_KEY) throw new Error("API Key Missing");
+    await this.disconnect();
 
     this.inputContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     this.outputContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
 
-    const fullInstruction = `${SYSTEM_INSTRUCTION}\n\n[CONTEXTUAL INTEL]:\n${knowledge}`;
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    this.session = await ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+    const sessionPromise = ai.live.connect({
+      model: 'gemini-2.5-flash-native-audio-preview-12-2025',
       config: {
-        systemInstruction: fullInstruction,
+        systemInstruction: `${SYSTEM_INSTRUCTION}\n\n[LOCAL INTEL]:\n${knowledge}`,
         responseModalities: [Modality.AUDIO],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } }, 
         },
-        tools: [{ googleSearch: {} }],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        generationConfig: { temperature: 0.2 } 
+        temperature: 0.0,
+        thinkingConfig: { thinkingBudget: 0 }
       },
       callbacks: {
-        onopen: this.handleOpen.bind(this),
-        onmessage: this.handleMessage.bind(this),
-        onclose: () => console.log("Session Closed"),
-        onerror: (err) => console.error("Session Error", err),
+        onopen: async () => { 
+          this.activeSession = await sessionPromise;
+          await this.startAudioStream(); 
+        },
+        onmessage: (msg: LiveServerMessage) => this.handleMessage(msg),
+        onclose: () => { this.activeSession = null; },
+        onerror: (err) => { 
+          console.error("Sniper Session Error:", err);
+          this.activeSession = null;
+        },
       },
     });
+
+    return await sessionPromise;
   }
 
   async disconnect() {
-    if (this.session) {
-      this.processor?.disconnect();
-      this.inputSource?.disconnect();
-      if (this.inputContext?.state !== 'closed') this.inputContext?.close();
-      if (this.outputContext?.state !== 'closed') this.outputContext?.close();
-      this.sources.forEach(s => { try { s.stop(); } catch(e) {} });
-      this.sources.clear();
-      this.session = null;
+    if (this.processor) { 
+        this.processor.onaudioprocess = null; 
+        this.processor.disconnect(); 
     }
+    if (this.inputSource) this.inputSource.disconnect();
+    this.sources.forEach(s => { try { s.stop(); } catch(e) {} });
+    this.sources.clear();
+    if (this.inputContext) await this.inputContext.close();
+    if (this.outputContext) await this.outputContext.close();
+    if (this.activeSession) this.activeSession.close();
+    
+    this.inputContext = this.outputContext = this.processor = this.inputSource = this.activeSession = null;
+    this.nextStartTime = 0;
   }
 
-  private async handleOpen() {
-    await this.startAudioStream();
-  }
-
-  private async handleMessage(message: LiveServerMessage) {
-    if (message.serverContent?.interrupted) {
-      // Stop current audio playback on interruption to prevent overlaps
-      this.sources.forEach(s => {
-        try {
-          s.stop();
-        } catch(e) {}
-      });
-      this.sources.clear();
-      this.nextStartTime = 0;
-      this.onStatusChange(false);
-      return;
+  private handleMessage(message: LiveServerMessage) {
+    // 1. Instant Audio Processing (Zero latency buffer)
+    const parts = message.serverContent?.modelTurn?.parts;
+    if (parts) {
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          this.onStatusChange(true);
+          this.playAudioChunk(part.inlineData.data);
+        }
+      }
     }
 
-    const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-    if (audioData) {
-      this.onStatusChange(true);
-      await this.playAudioChunk(audioData);
-    }
-
+    // 2. Real-time User Transcription (Source)
     if (message.serverContent?.inputTranscription) {
       const text = message.serverContent.inputTranscription.text;
       if (text) {
-        if (!this.currentTurnId) {
-          this.currentTurnId = Date.now().toString();
-          this.currentInputText = "";
+        if (!this.currentTurnId) { 
+          this.currentTurnId = `u-${Date.now()}`; 
+          this.currentInputText = ""; 
         }
         this.currentInputText += text;
-        this.onMessageUpdate({
-          id: this.currentTurnId,
-          speaker: Speaker.USER,
-          text: this.currentInputText,
-          timestamp: Date.now()
+        this.onMessageUpdate({ 
+          id: this.currentTurnId, 
+          speaker: Speaker.USER, 
+          text: this.currentInputText, 
+          timestamp: Date.now() 
         });
       }
     }
 
+    // 3. Real-time AI Transcription (Sniper)
     if (message.serverContent?.outputTranscription) {
       const text = message.serverContent.outputTranscription.text;
       if (text) {
-        if (!this.currentAiTurnId) {
-          this.currentAiTurnId = Date.now().toString() + 'ai';
-          this.currentAiText = "";
+        if (!this.currentAiTurnId) { 
+          this.currentAiTurnId = `ai-${Date.now()}`; 
+          this.currentAiText = ""; 
         }
         this.currentAiText += text;
-        this.onMessageUpdate({
-          id: this.currentAiTurnId,
-          speaker: Speaker.AI,
-          text: this.currentAiText,
-          timestamp: Date.now()
+        this.onMessageUpdate({ 
+          id: this.currentAiTurnId, 
+          speaker: Speaker.AI, 
+          text: this.currentAiText, 
+          timestamp: Date.now() 
         });
       }
     }
 
+    // 4. Reset markers on completion
     if (message.serverContent?.turnComplete) {
       this.currentTurnId = null;
-      this.currentInputText = "";
       this.currentAiTurnId = null;
+      this.currentInputText = "";
       this.currentAiText = "";
-      // Give a small delay to reset start time if nothing is queued
-      setTimeout(() => {
-        if (this.sources.size === 0) {
-          this.nextStartTime = 0;
-        }
-      }, 100);
     }
+  }
+
+  private async playAudioChunk(base64: string) {
+    if (!this.outputContext) return;
+    this.nextStartTime = Math.max(this.nextStartTime, this.outputContext.currentTime);
+    const audioBuffer = await decodeAudioData(decode(base64), this.outputContext, 24000, 1);
+    const source = this.outputContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.outputContext.destination);
+    source.onended = () => {
+      this.sources.delete(source);
+      if (this.sources.size === 0) this.onStatusChange(false);
+    };
+    source.start(this.nextStartTime);
+    this.nextStartTime += audioBuffer.duration;
+    this.sources.add(source);
   }
 
   private async startAudioStream() {
     if (!this.inputContext) return;
-    if (this.inputContext.state === 'suspended') await this.inputContext.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      } 
+    });
+    this.inputSource = this.inputContext.createMediaStreamSource(stream);
+    
+    // 256 samples (16ms) for immediate packetization
+    this.processor = this.inputContext.createScriptProcessor(256, 1, 1);
+    
+    this.processor.onaudioprocess = (e) => {
+      if (!this.activeSession) return;
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.inputSource = this.inputContext.createMediaStreamSource(stream);
-      this.processor = this.inputContext.createScriptProcessor(2048, 1, 1);
-
-      this.processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        let sum = 0;
-        for(let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
-        this.onVolumeChange(Math.sqrt(sum / inputData.length));
-
-        const pcmData = this.float32ToInt16(inputData);
-        const base64Data = this.arrayBufferToBase64(pcmData.buffer);
-        if (this.session) {
-          this.session.sendRealtimeInput({
-            media: { mimeType: "audio/pcm;rate=16000", data: base64Data }
-          });
-        }
-      };
-
-      this.inputSource.connect(this.processor);
-      this.processor.connect(this.inputContext.destination);
-    } catch (err) {
-      console.error("Mic Access Error", err);
-    }
-  }
-
-  private async playAudioChunk(base64Audio: string) {
-    if (!this.outputContext) return;
-    if (this.outputContext.state === 'suspended') await this.outputContext.resume();
-
-    try {
-      const arrayBuffer = this.base64ToArrayBuffer(base64Audio);
-      const audioBuffer = this.pcm16ToAudioBuffer(arrayBuffer, this.outputContext, 24000);
-      const source = this.outputContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.outputContext.destination);
-
-      const currentTime = this.outputContext.currentTime;
-      // Reduce gap to prevent hissing - use smaller offset for smoother playback
-      if (this.nextStartTime < currentTime) {
-        this.nextStartTime = currentTime + 0.005; // Reduced from 0.02 to 0.005
+      const inputData = e.inputBuffer.getChannelData(0);
+      const len = inputData.length;
+      const int16 = new Int16Array(len);
+      let sum = 0;
+      
+      for (let i = 0; i < len; i++) {
+        const sample = inputData[i];
+        sum += sample * sample;
+        int16[i] = sample * 32768;
       }
-
-      source.start(this.nextStartTime);
-      this.nextStartTime += audioBuffer.duration;
-      this.sources.add(source);
-
-      source.onended = () => {
-        this.sources.delete(source);
-        if (this.sources.size === 0) {
-          this.onStatusChange(false);
+      
+      this.onVolumeChange(Math.sqrt(sum / len));
+      
+      this.activeSession.sendRealtimeInput({
+        media: { 
+          mimeType: "audio/pcm;rate=16000", 
+          data: encode(new Uint8Array(int16.buffer))
         }
-      };
-    } catch (error) {
-      console.error("Audio Playback Error", error);
-    }
-  }
-
-  private float32ToInt16(float32: Float32Array): Int16Array {
-    const int16 = new Int16Array(float32.length);
-    for (let i = 0; i < float32.length; i++) {
-      let s = Math.max(-1, Math.min(1, float32[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    return int16;
-  }
-
-  private arrayBufferToBase64(buffer: ArrayBuffer): string {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
-    return window.btoa(binary);
-  }
-
-  private base64ToArrayBuffer(base64: string): ArrayBuffer {
-    const binaryString = window.atob(base64);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-    return bytes.buffer;
-  }
-
-  private pcm16ToAudioBuffer(buffer: ArrayBuffer, ctx: AudioContext, sampleRate: number): AudioBuffer {
-    const dataInt16 = new Int16Array(buffer);
-    const audioBuffer = ctx.createBuffer(1, dataInt16.length, sampleRate);
-    const channelData = audioBuffer.getChannelData(0);
-    for (let i = 0; i < dataInt16.length; i++) channelData[i] = dataInt16[i] / 32768.0;
-    return audioBuffer;
+      });
+    };
+    
+    this.inputSource.connect(this.processor);
+    this.processor.connect(this.inputContext.destination);
   }
 }
